@@ -41,6 +41,12 @@ def init_db():
                   mood_tags TEXT, notes TEXT, entry_date DATE,
                     UNIQUE(user_id, entry_date),
                   FOREIGN KEY(user_id) REFERENCES users(id))''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS journal_entries
+                 (id INTEGER PRIMARY KEY, user_id INTEGER, journal_text TEXT,
+                    entry_date DATE,
+                    UNIQUE(user_id, entry_date),
+                  FOREIGN KEY(user_id) REFERENCES users(id))''')
     conn.commit()
     conn.close()
 
@@ -167,30 +173,93 @@ def get_mood_history(user_id):
     }), 200
 
 
-@app.route('/')
-def index():
-    assert app.static_folder is not None
-    return send_from_directory(app.static_folder, 'index.html')
-
-
-@app.route('/api/debug/db', methods=['GET'])
-def debug_db():
-    """Development only - view database contents"""
+@app.route('/api/journal', methods=['POST'])
+@login_required
+def journal_entry(user_id):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
 
-    c.execute('SELECT id, username FROM users')
-    users = [{'id': u[0], 'username': u[1]} for u in c.fetchall()]
+    data = request.json
+    journal_text = data.get('journal_text', '')
+    entry_date = date.today().isoformat()
 
-    c.execute('''SELECT m.id, u.username, m.mood_level, m.mood_tags, m.notes, m.entry_date 
-                 FROM mood_entries m 
-                 JOIN users u ON m.user_id = u.id 
-                 ORDER BY m.entry_date DESC''')
-    moods = [{'id': m[0], 'username': m[1], 'mood_level': m[2], 
-              'tags': m[3], 'notes': m[4], 'date': m[5]} for m in c.fetchall()]
+    if not journal_text:
+        conn.close()
+        return jsonify({'error': 'Journal text is required'}), 400
 
+    # Get existing entry for the day
+    c.execute('''SELECT journal_text, entry_date
+                 FROM journal_entries WHERE user_id = ? and entry_date = ?''',
+              (user_id, entry_date))
+    entries = c.fetchall()
+    if entries:
+        # Update existing entry
+        c.execute('''
+            UPDATE journal_entries
+            SET journal_text = ?
+            WHERE user_id = ? AND entry_date = ?
+        ''', (journal_text, user_id, entry_date))
+        conn.commit()
+        conn.close()
+        return jsonify({'message': 'Journal entry updated successfully', 'date': entry_date}), 200
+    else:
+        c.execute('''
+            INSERT INTO journal_entries (user_id, journal_text, entry_date)
+            VALUES (?, ?, ?)
+        ''', (user_id, journal_text, entry_date))
+        conn.commit()
+        conn.close()
+        return jsonify({'message': 'Journal entry logged successfully', 'date': entry_date}), 201
+
+
+@app.route('/api/journal/history', methods=['GET'])
+@login_required
+def get_journal_history(user_id):
+
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+
+    c.execute('''SELECT journal_text, entry_date 
+                 FROM journal_entries WHERE user_id = ? ORDER BY entry_date DESC''',
+              (user_id,))
+    entries = c.fetchall()
     conn.close()
-    return jsonify({'users': users, 'mood_entries': moods}), 200
+
+    return jsonify({
+        'entries': [
+            {'journal_text': e[0], 'date': e[1]}
+            for e in entries
+        ]
+    }), 200
+
+
+@app.route('/')
+def index():
+    assert app.static_folder is not None
+    return send_from_directory(app.static_folder, 'newindex.html')
+
+
+if os.environ.get("FLASK_ENV") != "production":
+    @app.route('/api/debug/db', methods=['GET'])
+    def debug_db():
+        """Development only - view database contents"""
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+
+        c.execute('SELECT id, username FROM users')
+        users = [{'id': u[0], 'username': u[1]} for u in c.fetchall()]
+
+        c.execute('''SELECT m.id, u.username, m.mood_level, m.mood_tags, m.notes, m.entry_date 
+                    FROM mood_entries m
+                    JOIN users u ON m.user_id = u.id
+                    ORDER BY m.entry_date DESC''')
+        moods = [
+            {'id': m[0], 'username': m[1], 'mood_level': m[2], 'tags': m[3], 'notes': m[4], 'date': m[5]}
+            for m in c.fetchall()
+        ]
+
+        conn.close()
+        return jsonify({'users': users, 'mood_entries': moods}), 200
 
 
 if __name__ == '__main__':
